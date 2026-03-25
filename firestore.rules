@@ -1,0 +1,276 @@
+// ════════════════════════════════════════════════════════════════════════
+// FILE: firestore.rules
+// PURPOSE: Firestore security rules for Plantness.
+//
+// SECTION INDEX
+// ─────────────────────────────────────────────────────────────────────
+// §1  HELPER FUNCTIONS
+// §2  USERS COLLECTION
+// §3  BUSINESSES COLLECTION
+// §4  BUSINESSES SETTINGS SUBCOLLECTION  (groq key, business config)
+// §5  PRODUCTS
+// §6  VARIANTS + EVENTS SUBCOLLECTION
+// §7  INVENTORY_STATE
+// §8  ORDERS + ITEMS SUBCOLLECTION
+// §9  CUSTOMERS
+// §10 SUPPLIERS
+// §11 PENDING SUBMISSIONS
+// ════════════════════════════════════════════════════════════════════════
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+
+    // ════════════════════════════════════════════════════════════════
+    // §1 HELPER FUNCTIONS
+    // ════════════════════════════════════════════════════════════════
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function getUserRole() {
+      return getUserData().role;
+    }
+
+    function getUserBusinessId() {
+      return getUserData().business_id;
+    }
+
+    // Core multi-tenancy check — every business-scoped rule uses this
+    function belongsToBusiness(businessId) {
+      return isSignedIn() && getUserBusinessId() == businessId;
+    }
+
+    function isOwnerOf(businessId) {
+      return belongsToBusiness(businessId) && getUserRole() == 'owner';
+    }
+
+    function isManagerOf(businessId) {
+      return belongsToBusiness(businessId) &&
+        (getUserRole() == 'manager' || getUserRole() == 'owner');
+    }
+
+    function isStaffOf(businessId) {
+      return belongsToBusiness(businessId);
+    }
+
+    function hasField(field) {
+      return field in request.resource.data;
+    }
+
+    function fieldNotChanged(field) {
+      return request.resource.data[field] == resource.data[field];
+    }
+
+
+    // ════════════════════════════════════════════════════════════════
+    // §2 USERS COLLECTION
+    // users/{uid} — global, not business-scoped
+    // ════════════════════════════════════════════════════════════════
+    match /users/{uid} {
+      allow read: if isSignedIn() && (
+        request.auth.uid == uid ||
+        (getUserBusinessId() != null &&
+         get(/databases/$(database)/documents/users/$(uid)).data.business_id == getUserBusinessId() &&
+         (getUserRole() == 'manager' || getUserRole() == 'owner'))
+      );
+      allow create: if isSignedIn() && request.auth.uid == uid;
+      allow update: if isSignedIn() && (
+        (request.auth.uid == uid && fieldNotChanged('role') && fieldNotChanged('business_id')) ||
+        (getUserRole() == 'owner' && getUserBusinessId() == resource.data.business_id)
+      );
+      allow delete: if false;
+    }
+
+
+    // ════════════════════════════════════════════════════════════════
+    // §3 BUSINESSES COLLECTION
+    // businesses/{businessId} — business metadata
+    // ════════════════════════════════════════════════════════════════
+    match /businesses/{businessId} {
+      allow read:   if isStaffOf(businessId);
+      allow create: if isSignedIn() && request.auth.uid == businessId;
+      allow update: if isOwnerOf(businessId);
+      allow delete: if false;
+
+
+      // ── §4 SETTINGS SUBCOLLECTION ──────────────────────────────────
+      // businesses/{businessId}/settings/{docId}
+      //
+      // Two documents:
+      //   settings/general  — business name, reservation expiry, etc.
+      //   settings/api_keys — groq_api_key (masked in UI)
+      //
+      // Read:  any business member (needed to use AI scanner)
+      // Write: owner only
+      // ─────────────────────────────────────────────────────────────
+      match /settings/{settingId} {
+        allow read:          if isStaffOf(businessId);
+        allow create, update: if isOwnerOf(businessId);
+        allow delete:        if isOwnerOf(businessId);
+      }
+    }
+
+
+    // ════════════════════════════════════════════════════════════════
+    // §5 PRODUCTS
+    // businesses/{businessId}/products/{productId}
+    // ════════════════════════════════════════════════════════════════
+    match /businesses/{businessId}/products/{productId} {
+      allow read:           if isStaffOf(businessId);
+      allow create, update: if isManagerOf(businessId);
+      allow delete:         if isOwnerOf(businessId);
+    }
+
+
+    // ════════════════════════════════════════════════════════════════
+    // §6 VARIANTS + EVENTS SUBCOLLECTION
+    // businesses/{businessId}/variants/{variantId}
+    // businesses/{businessId}/variants/{variantId}/events/{eventId}
+    // ════════════════════════════════════════════════════════════════
+    match /businesses/{businessId}/variants/{variantId} {
+      allow read:           if isStaffOf(businessId);
+      allow create, update: if isManagerOf(businessId);
+      allow delete:         if isOwnerOf(businessId);
+
+      match /events/{eventId} {
+        allow read: if isStaffOf(businessId);
+
+        // Law 3: reason must exist and be non-empty
+        // Law 11: idempotency_key must exist
+        allow create: if isStaffOf(businessId) &&
+          hasField('reason') && request.resource.data.reason != '' &&
+          hasField('idempotency_key') && request.resource.data.idempotency_key != '' &&
+          hasField('event_id') && hasField('variant_id') && hasField('type');
+
+        // Events are immutable — no updates or deletes
+        allow update: if false;
+        allow delete: if false;
+      }
+    }
+
+
+    // ════════════════════════════════════════════════════════════════
+    // §7 INVENTORY_STATE
+    // businesses/{businessId}/inventory_state/{variantId}
+    // V1: any business member can write (inventory.js is the gatekeeper)
+    // V2: restrict to Cloud Function service account
+    // ════════════════════════════════════════════════════════════════
+    match /businesses/{businessId}/inventory_state/{variantId} {
+      allow read:  if isStaffOf(businessId);
+      allow write: if isStaffOf(businessId);
+    }
+
+
+    // ════════════════════════════════════════════════════════════════
+    // §8 ORDERS + ITEMS SUBCOLLECTION
+    // businesses/{businessId}/orders/{orderId}
+    // Law 8: Orders are NEVER deleted
+    // ════════════════════════════════════════════════════════════════
+    match /businesses/{businessId}/orders/{orderId} {
+      allow read: if isStaffOf(businessId);
+
+      allow create: if isStaffOf(businessId) &&
+        request.resource.data.status == 'draft';
+
+      allow update: if isStaffOf(businessId) &&
+        request.resource.data.status in [
+          'draft', 'confirmed', 'dispatched',
+          'delivered', 'cancelled', 'EXPIRED_PENDING_ACTION'
+        ];
+
+      // Law 8: never deleted
+      allow delete: if false;
+
+      match /items/{itemId} {
+        allow read:   if isStaffOf(businessId);
+        allow create: if isStaffOf(businessId);
+        allow update: if isStaffOf(businessId);
+        allow delete: if isManagerOf(businessId);
+      }
+    }
+
+
+    // ════════════════════════════════════════════════════════════════
+    // §9 CUSTOMERS
+    // businesses/{businessId}/customers/{customerId}
+    // ════════════════════════════════════════════════════════════════
+    match /businesses/{businessId}/customers/{customerId} {
+      allow read:   if isStaffOf(businessId);
+      allow create: if isStaffOf(businessId);
+      allow update: if isStaffOf(businessId);
+      allow delete: if isOwnerOf(businessId);
+    }
+
+
+    // ════════════════════════════════════════════════════════════════
+    // §10 SUPPLIERS
+    // businesses/{businessId}/suppliers/{supplierId}
+    // ════════════════════════════════════════════════════════════════
+    match /businesses/{businessId}/suppliers/{supplierId} {
+      allow read:           if isStaffOf(businessId);
+      allow create, update: if isManagerOf(businessId);
+      allow delete:         if isOwnerOf(businessId);
+    }
+
+
+    // ════════════════════════════════════════════════════════════════
+    // §11 PENDING SUBMISSIONS
+    // businesses/{businessId}/pending_submissions/{submissionId}
+    // ════════════════════════════════════════════════════════════════
+    match /businesses/{businessId}/pending_submissions/{submissionId} {
+      allow read: if isStaffOf(businessId) && (
+        resource.data.submitted_by == request.auth.uid || isManagerOf(businessId)
+      );
+      allow create: if isStaffOf(businessId) &&
+        request.resource.data.submitted_by == request.auth.uid;
+      allow update: if isManagerOf(businessId);
+      allow delete: if isManagerOf(businessId);
+    }
+
+
+    // §12b TEAM MEMBERS SUBCOLLECTION
+    // businesses/{businessId}/team_members/{memberId}
+    // Readable by all business members, writable by owner/manager.
+    match /businesses/{businessId}/team_members/{memberId} {
+      allow read:           if isStaffOf(businessId);
+      allow create, update: if isManagerOf(businessId);
+      allow delete:         if isOwnerOf(businessId);
+    }
+
+
+    // ════════════════════════════════════════════════════════════════
+    // §13 WHITELIST
+    // whitelist/allowed — global doc storing allowed emails for new business creation
+    // Read:  any signed-in user (needed during first sign-in check before user doc exists)
+    // Write: only the boss account (konami.pes.0813@gmail.com)
+    // ════════════════════════════════════════════════════════════════
+    match /whitelist/{docId} {
+      allow read:           if isSignedIn();
+      allow create, update: if isSignedIn() && request.auth.token.email == 'konami.pes.0813@gmail.com';
+      allow delete:         if false;
+    }
+
+
+    // §12 DRAFTS
+    match /businesses/{businessId}/drafts/{draftId} {
+      allow read: if isStaffOf(businessId) && (
+        resource.data.created_by == request.auth.uid || isManagerOf(businessId)
+      );
+      allow create: if isStaffOf(businessId) &&
+        request.resource.data.created_by == request.auth.uid;
+      allow update: if isStaffOf(businessId) &&
+        resource.data.created_by == request.auth.uid;
+      allow delete: if isStaffOf(businessId) && (
+        resource.data.created_by == request.auth.uid || isManagerOf(businessId)
+      );
+    }
+
+  } // end match /databases/{database}/documents
+} // end service cloud.firestore
