@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"/>
+<title>Plantness</title>
+
+<!--
+════════════════════════════════════════════════════════════════════════
+FILE: index.html
+PURPOSE: App shell — auth, navigation, screen routing.
+         Feature UI lives in src/screens/*.js modules.
+         This file stays thin — routing and chrome only.
+
+SECTION INDEX
+─────────────────────────────────────────────────────────────────────
+§1  DESIGN TOKENS & RESET
+§2  LOADING & AUTH SCREENS
+§3  APP SHELL              (topbar, bottom nav, screen slot)
+§4  SHARED COMPONENT CSS   (cards, buttons, forms, badges, etc.)
+§5  SCREEN-SPECIFIC CSS    (more screen, scan drop zone, etc.)
+§6  FIREBASE INITIALISATION
+§7  APP BOOTSTRAP          (auth listener → screen routing)
+════════════════════════════════════════════════════════════════════════
+-->
+
+<style>
+
+/* ── §1 DESIGN TOKENS & RESET ──────────────────────────────────────── */
+:root {
+  --bg:    #0a0f0b;
+  --bg2:   #0f160f;
+  --sur:   #141f14;
+  --sur2:  #1a281a;
+  --bdr:   #1e2e1e;
+  --bdr2:  #263826;
+  --bdr3:  #304830;
+  --txt:   #e8f0e8;
+  --txt2:  #9ab89a;
+  --muted: #4a6b4a;
+  --grn:   #3d9e5c;
+  --grn2:  #52c275;
+  --gdim:  rgba(61,158,92,.1);
+  --gbdr:  rgba(61,158,92,.25);
+  --gold:  #c9a84c;
+  --godim: rgba(201,168,76,.1);
+  --gobdr: rgba(201,168,76,.25);
+  --red:   #c0524a;
+  --rdim:  rgba(192,82,74,.1);
+  --rbdr:  rgba(192,82,74,.25);
+  --blue:  #4a7eb5;
+  --bdim:  rgba(74,126,181,.1);
+  --bbdr:  rgba(74,126,181,.25);
+
+  --r:        8px;
+  --rl:       12px;
+  --topbar-h: 52px;
+  --nav-h:    64px;
+  --font:     -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; }
+body { background: var(--bg); color: var(--txt); font-family: var(--font); font-size: 14px; line-height: 1.55; -webkit-font-smoothing: antialiased; }
+input, textarea, button, select { font-family: var(--font); font-size: 14px; }
+button { cursor: pointer; }
+a { color: var(--grn2); text-decoration: none; }
+
+/* ── §2 LOADING & AUTH SCREENS ─────────────────────────────────────── */
+
+#screen-loading {
+  position: fixed; inset: 0; background: var(--bg);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 16px; z-index: 9999;
+}
+.loading-brand { font-size: 22px; font-weight: 600; color: var(--grn2); letter-spacing: 3px; text-transform: uppercase; }
+.loading-sub   { font-size: 11px; color: var(--muted); letter-spacing: 1.5px; text-transform: uppercase; }
+.spinner       { width: 22px; height: 22px; border: 2px solid var(--bdr3); border-top-color: var(--grn); border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+#screen-auth {
+  display: none; position: fixed; inset: 0; background: var(--bg);
+  align-items: center; justify-content: center; padding: 24px; z-index: 1000;
+}
+.auth-wrap      { width: 100%; max-width: 340px; }
+.auth-brand     { font-size: 13px; font-weight: 600; color: var(--grn2); letter-spacing: 4px; text-transform: uppercase; margin-bottom: 40px; display: flex; align-items: center; gap: 8px; }
+.auth-brand-dot { width: 6px; height: 6px; background: var(--grn); border-radius: 50%; }
+.auth-headline  { font-size: 28px; font-weight: 600; line-height: 1.2; margin-bottom: 8px; }
+.auth-sub       { font-size: 13px; color: var(--muted); margin-bottom: 32px; line-height: 1.7; }
+
+#btn-signin {
+  width: 100%; padding: 13px 18px; background: var(--sur); border: 1px solid var(--bdr2);
+  border-radius: var(--r); color: var(--txt); font-size: 14px; font-weight: 500;
+  display: flex; align-items: center; justify-content: center; gap: 10px; transition: all .2s;
+}
+#btn-signin:hover    { background: var(--sur2); border-color: var(--gbdr); }
+#btn-signin:disabled { opacity: .5; cursor: not-allowed; }
+
+#auth-error {
+  display: none; margin-top: 12px; padding: 10px 14px;
+  background: var(--rdim); border: 1px solid var(--rbdr); border-radius: var(--r);
+  font-size: 12px; color: var(--red); line-height: 1.6;
+}
+
+/* ── §3 APP SHELL ──────────────────────────────────────────────────── */
+
+#app { display: none; flex-direction: column; height: 100vh; overflow: hidden; }
+
+/* Offline banner */
+#offline-banner {
+  display: none; background: var(--godim); border-bottom: 1px solid var(--gobdr);
+  color: var(--gold); font-size: 12px; font-weight: 500; padding: 7px 14px; text-align: center;
+  flex-shrink: 0;
+}
+
+/* Top bar */
+.topbar {
+  height: var(--topbar-h); background: var(--bg); border-bottom: 1px solid var(--bdr);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 14px; flex-shrink: 0; position: relative; z-index: 100;
+}
+.topbar-brand { font-size: 15px; font-weight: 600; color: var(--grn2); letter-spacing: .5px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topbar-right { display: flex; align-items: center; gap: 8px; }
+
+.user-chip   { display: flex; align-items: center; gap: 6px; padding: 3px 9px 3px 3px; border: 1px solid var(--bdr); border-radius: 99px; }
+.user-avatar { width: 26px; height: 26px; border-radius: 50%; background: var(--gdim); border: 1px solid var(--gbdr); color: var(--grn); font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; overflow: hidden; flex-shrink: 0; }
+.user-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.user-name   { max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
+
+.role-badge   { font-size: 9px; font-weight: 700; padding: 2px 7px; border-radius: 99px; letter-spacing: .5px; text-transform: uppercase; }
+.role-owner   { background: var(--gdim);  color: var(--grn);  border: 1px solid var(--gbdr); }
+.role-manager { background: var(--bdim);  color: var(--blue); border: 1px solid var(--bbdr); }
+.role-staff   { background: var(--sur2);  color: var(--muted);border: 1px solid var(--bdr2); }
+
+.btn-ghost       { padding: 5px 10px; border: 1px solid var(--bdr); border-radius: 6px; background: transparent; color: var(--muted); font-size: 12px; transition: all .15s; }
+.btn-ghost:hover { color: var(--txt2); border-color: var(--bdr2); }
+
+/* Screen content */
+#screen-content { flex: 1; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; padding-bottom: var(--nav-h); }
+
+/* Bottom nav */
+.bottom-nav { height: var(--nav-h); background: var(--bg); border-top: 1px solid var(--bdr); display: flex; align-items: stretch; flex-shrink: 0; z-index: 100; }
+.nav-item   { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; background: none; border: none; color: var(--muted); font-size: 10px; font-weight: 500; letter-spacing: .3px; cursor: pointer; transition: color .15s; position: relative; padding: 0 4px; }
+.nav-item:hover  { color: var(--txt2); }
+.nav-item.active { color: var(--grn2); }
+.nav-icon        { font-size: 20px; line-height: 1; }
+.nav-badge       { position: absolute; top: 8px; right: calc(50% - 14px); background: var(--red); color: #fff; font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 99px; min-width: 16px; text-align: center; }
+
+/* Modal overlay */
+#modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.75); display: none; align-items: flex-end; justify-content: center; z-index: 1000; }
+#modal-overlay.open { display: flex; }
+#modal-box { background: var(--sur); border: 1px solid var(--bdr2); border-radius: var(--rl) var(--rl) 0 0; padding: 22px; width: 100%; max-height: 90vh; overflow-y: auto; }
+@media(min-width:560px){ #modal-overlay { align-items: center; padding: 16px; } #modal-box { border-radius: var(--rl); max-width: 440px; } }
+.modal-handle { width: 36px; height: 3px; background: var(--bdr2); border-radius: 99px; margin: 0 auto 14px; }
+.modal-title  { font-size: 17px; font-weight: 600; margin-bottom: 14px; }
+.modal-footer { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+
+/* Toast */
+#toast { position: fixed; bottom: calc(var(--nav-h) + 12px); left: 50%; transform: translateX(-50%); z-index: 3000; padding: 10px 18px; border-radius: var(--rl); font-size: 13px; font-weight: 600; color: #fff; box-shadow: 0 8px 30px rgba(0,0,0,.5); display: none; white-space: nowrap; pointer-events: none; }
+
+
+/* ── §4 SHARED COMPONENT CSS ───────────────────────────────────────── */
+
+.hide { display: none !important; }
+
+/* Layout */
+.wrap   { max-width: 720px; margin: 0 auto; padding: 16px 14px; }
+.row    { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+@media(max-width:480px){ .grid-2 { grid-template-columns: 1fr; } .grid-3 { grid-template-columns: 1fr 1fr; } }
+
+/* Cards */
+.card { background: var(--sur); border: 1px solid var(--bdr); border-radius: var(--rl); padding: 15px; margin-bottom: 12px; }
+
+/* Section title */
+.section-title { font-size: 10px; font-weight: 600; color: var(--muted); letter-spacing: .8px; text-transform: uppercase; margin-bottom: 10px; }
+
+/* Stat boxes — horizontal row of summary stats */
+.stats-row { display: grid; grid-template-columns: repeat(4,1fr); gap: 8px; margin-bottom: 14px; }
+@media(max-width:400px){ .stats-row { grid-template-columns: repeat(2,1fr); } }
+.stat-box   { background: var(--sur); border: 1px solid var(--bdr); border-radius: var(--r); padding: 11px 12px; }
+.stat-value { font-size: 20px; font-weight: 600; line-height: 1; }
+.stat-label { font-size: 9px; color: var(--muted); letter-spacing: .3px; text-transform: uppercase; margin-top: 3px; }
+
+/* Buttons */
+.btn          { padding: 9px 16px; border-radius: var(--r); border: none; font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; transition: all .15s; white-space: nowrap; }
+.btn:active   { opacity: .75; }
+.btn-primary  { background: var(--grn);  color: #080f09; }
+.btn-primary:hover  { background: var(--grn2); }
+.btn-secondary{ background: var(--sur2); color: var(--txt2); border: 1px solid var(--bdr2); }
+.btn-secondary:hover{ background: var(--sur); border-color: var(--bdr); }
+.btn-danger   { background: var(--rdim); color: var(--red);  border: 1px solid var(--rbdr); }
+.btn-small    { padding: 5px 10px; font-size: 11px; border-radius: 6px; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+
+/* Form elements */
+.label  { display: block; font-size: 10px; font-weight: 600; color: var(--muted); letter-spacing: .5px; text-transform: uppercase; margin-bottom: 5px; }
+.input  { width: 100%; background: var(--bg2); border: 1px solid var(--bdr); border-radius: 7px; color: var(--txt); font-size: 14px; padding: 9px 12px; outline: none; transition: border .15s; }
+.input:focus       { border-color: var(--gbdr); }
+.input::placeholder{ color: var(--muted); }
+textarea.input     { resize: vertical; min-height: 72px; line-height: 1.55; }
+.form-group        { margin-bottom: 12px; }
+.form-error        { font-size: 11px; color: var(--red); margin-top: 4px; }
+
+/* Badges */
+.badge           { font-size: 9px; font-weight: 700; padding: 2px 8px; border-radius: 99px; letter-spacing: .3px; text-transform: uppercase; display: inline-block; }
+.badge-draft     { background: var(--sur2);  color: var(--muted); border: 1px solid var(--bdr2); }
+.badge-confirmed { background: var(--godim); color: var(--gold);  border: 1px solid var(--gobdr); }
+.badge-dispatched{ background: var(--gdim);  color: var(--grn2);  border: 1px solid var(--gbdr); }
+.badge-delivered { background: rgba(74,126,181,.1); color: var(--blue); border: 1px solid var(--bbdr); }
+.badge-cancelled { background: var(--rdim);  color: var(--red);   border: 1px solid var(--rbdr); }
+.badge-expired   { background: rgba(192,82,74,.15); color: var(--red); border: 1px solid var(--rbdr); }
+.badge-high      { background: var(--gdim);  color: var(--grn2); }
+.badge-low       { background: var(--godim); color: var(--gold); }
+.badge-none      { background: var(--rdim);  color: var(--red);  }
+
+/* Confidence prefix (~) */
+.confidence-low::before { content: '~'; color: var(--gold); }
+
+/* Info rows */
+.info-row   { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--bdr); font-size: 13px; }
+.info-row:last-child  { border-bottom: none; }
+.info-label { color: var(--muted); font-size: 12px; }
+.info-value { font-weight: 500; }
+
+/* Empty state */
+.empty-state       { text-align: center; padding: 48px 20px; color: var(--muted); }
+.empty-state-icon  { font-size: 36px; margin-bottom: 12px; opacity: .3; }
+.empty-state-title { font-size: 17px; font-weight: 600; color: var(--txt2); margin-bottom: 6px; }
+.empty-state-sub   { font-size: 13px; line-height: 1.7; }
+
+/* Status boxes */
+.status-ok   { background: var(--gdim);  border: 1px solid var(--gbdr);  color: var(--grn2); padding: 10px 14px; border-radius: var(--r); font-size: 13px; line-height: 1.6; }
+.status-warn { background: var(--godim); border: 1px solid var(--gobdr); color: var(--gold); padding: 10px 14px; border-radius: var(--r); font-size: 13px; line-height: 1.6; }
+.status-err  { background: var(--rdim);  border: 1px solid var(--rbdr);  color: var(--red);  padding: 10px 14px; border-radius: var(--r); font-size: 13px; line-height: 1.6; }
+
+/* Search */
+.search-wrap  { position: relative; }
+.search-icon  { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); font-size: 13px; pointer-events: none; }
+.search-input { padding-left: 34px; }
+
+/* Loading spinner inside screen content */
+.screen-loading-inner { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 50vh; gap: 12px; }
+.screen-loading-msg   { font-size: 12px; color: var(--muted); }
+
+/* Back button */
+.back-btn { display: flex; align-items: center; gap: 4px; background: none; border: none; color: var(--txt2); font-size: 14px; font-weight: 500; padding: 0; margin-bottom: 14px; cursor: pointer; }
+.back-btn:hover { color: var(--grn2); }
+
+/* Sub-screen titles */
+.subscreen-title { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+.subscreen-sub   { font-size: 13px; color: var(--muted); line-height: 1.6; margin-bottom: 4px; }
+
+
+/* ── §5 SCREEN-SPECIFIC CSS ────────────────────────────────────────── */
+
+/* More screen */
+.more-profile      { display: flex; align-items: center; gap: 12px; padding: 16px 0; margin-bottom: 10px; }
+.more-avatar       { width: 48px; height: 48px; border-radius: 50%; background: var(--gdim); border: 1px solid var(--gbdr); color: var(--grn2); font-size: 18px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.more-profile-info { flex: 1; min-width: 0; }
+.more-profile-name { font-size: 16px; font-weight: 600; margin-bottom: 2px; }
+.more-profile-email{ font-size: 12px; color: var(--muted); }
+.more-biz-name     { font-size: 15px; font-weight: 600; margin-bottom: 3px; }
+.more-biz-id       { font-size: 10px; color: var(--muted); font-family: monospace; }
+
+.more-menu         { display: flex; flex-direction: column; gap: 0; }
+.more-menu-item    { display: flex; align-items: center; gap: 12px; padding: 12px 0; border: none; background: none; color: var(--txt); font-size: 14px; font-weight: 500; cursor: pointer; border-bottom: 1px solid var(--bdr); text-align: left; width: 100%; transition: color .15s; }
+.more-menu-item:last-child  { border-bottom: none; }
+.more-menu-item:hover       { color: var(--grn2); }
+.more-menu-icon    { font-size: 18px; width: 24px; flex-shrink: 0; }
+.more-menu-label   { flex: 1; }
+.more-menu-arrow   { color: var(--muted); font-size: 18px; }
+.more-menu-badge   { background: var(--red); color: #fff; font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 99px; }
+
+/* Suppliers screen */
+.sup-row  { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--bdr); }
+.sup-row:last-child { border-bottom: none; }
+.sup-info { flex: 1; min-width: 0; }
+.sup-name { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+.sup-meta { font-size: 11px; color: var(--muted); }
+
+/* Scan drop zone */
+.drop-zone       { border: 1.5px dashed var(--bdr2); border-radius: var(--r); padding: 28px 16px; text-align: center; cursor: pointer; color: var(--muted); font-size: 12px; transition: all .15s; }
+.drop-zone:hover { border-color: var(--gbdr); background: var(--gdim); color: var(--grn2); }
+.drop-zone-icon  { font-size: 28px; margin-bottom: 8px; opacity: .5; }
+.drop-zone-title { font-weight: 600; font-size: 13px; margin-bottom: 3px; }
+.drop-zone-sub   { font-size: 11px; opacity: .6; }
+
+/* Filter chips — used by inventory, activity log, reports */
+.inv-filter-row{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;padding-bottom:2px}
+.inv-filter-row::-webkit-scrollbar{display:none}
+.inv-filter-chip{padding:5px 12px;border-radius:99px;border:1px solid var(--bdr2);background:var(--sur2);color:var(--muted);font-size:11px;font-weight:500;cursor:pointer;white-space:nowrap;transition:all .15s;flex-shrink:0}
+.inv-filter-chip.active{background:var(--gdim);border-color:var(--gbdr);color:var(--grn2)}
+
+/* Order create — locked customer chip (edit mode) */
+.oc-customer-chip-locked { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--gdim); border: 1px solid var(--gbdr); border-radius: var(--r); }
+.oc-chip-avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--grn); color: #080f09; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.oc-chip-name   { font-size: 13px; font-weight: 600; flex: 1; }
+.oc-chip-phone  { font-size: 11px; color: var(--muted); }
+
+</style>
+</head>
+<body>
+
+<!-- ── Loading screen ────────────────────────────────────────────────── -->
+<div id="screen-loading">
+  <div class="loading-brand">Plantness</div>
+  <div class="spinner"></div>
+  <div class="loading-sub" id="loading-msg">Starting up…</div>
+</div>
+
+<!-- ── Auth screen ───────────────────────────────────────────────────── -->
+<div id="screen-auth">
+  <div class="auth-wrap">
+    <div class="auth-brand"><div class="auth-brand-dot"></div>Plantness</div>
+    <div class="auth-headline">Stock that<br/>you can trust.</div>
+    <div class="auth-sub">Inventory and orders for plant businesses.</div>
+    <button id="btn-signin">
+      <svg width="16" height="16" viewBox="0 0 24 24">
+        <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+        <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+        <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/>
+        <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+      </svg>
+      Continue with Google
+    </button>
+    <div id="auth-error"></div>
+  </div>
+</div>
+
+<!-- ── App shell ─────────────────────────────────────────────────────── -->
+<div id="app">
+
+  <div id="offline-banner">⚠ You're offline — browsing only. Stock changes require connection.</div>
+
+  <div class="topbar">
+    <div style="display:flex;align-items:center;gap:8px">
+      <!-- Business name in topbar — updated after auth resolves -->
+      <div class="topbar-brand" id="topbar-brand">Plantness</div>
+      <span class="role-badge" id="topbar-role"></span>
+    </div>
+    <div class="topbar-right">
+      <div class="user-chip">
+        <div class="user-avatar" id="user-avatar"></div>
+        <span class="user-name" id="user-name"></span>
+      </div>
+    </div>
+  </div>
+
+  <div id="screen-content"></div>
+
+  <nav class="bottom-nav" id="bottom-nav">
+    <button class="nav-item active" data-screen="orders">
+      <span class="nav-icon">📋</span><span>Orders</span>
+    </button>
+    <button class="nav-item" data-screen="inventory">
+      <span class="nav-icon">📦</span><span>Stock</span>
+    </button>
+    <button class="nav-item" data-screen="scan">
+      <span class="nav-icon">⚡</span><span>Scan</span>
+    </button>
+    <button class="nav-item" data-screen="customers">
+      <span class="nav-icon">👥</span><span>Customers</span>
+    </button>
+    <button class="nav-item" data-screen="more">
+      <span class="nav-icon">☰</span><span>More</span>
+      <span class="nav-badge hide" id="pending-badge">0</span>
+    </button>
+  </nav>
+
+</div>
+
+<!-- Modal overlay — shared across all screens -->
+<div id="modal-overlay">
+  <div id="modal-box"></div>
+</div>
+
+<div id="toast"></div>
+
+<!-- ── §6 FIREBASE INITIALISATION ──────────────────────────────────── -->
+<script type="module">
+
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
+import { getFirestore }  from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
+import { getAuth }       from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+
+import * as DB        from './src/db.js';
+import * as Auth      from './src/auth.js';
+import * as UI        from './src/ui.js';
+
+// ── Screen modules ────────────────────────────────────────────────────
+import { renderOrders }    from './src/screens/orders.js';
+import { renderInventory } from './src/screens/inventory.js';
+import { renderScan }      from './src/screens/scan.js';
+import { renderCustomers } from './src/screens/customers.js';
+import { renderMore }      from './src/screens/more.js';
+import { listPending }     from './src/services/drafts.js';
+
+// ── §1 CONFIG ─────────────────────────────────────────────────────────
+const FIREBASE_CONFIG = {
+  apiKey:            'AIzaSyBtOEBJKqxSKrEFFKZdT4nbsLCLox4aOhs',
+  authDomain:        'plantness-19f5d.firebaseapp.com',
+  projectId:         'plantness-19f5d',
+  storageBucket:     'plantness-19f5d.firebasestorage.app',
+  messagingSenderId: '324233403798',
+  appId:             '1:324233403798:web:bf694848f31c13c26651b7',
+};
+
+console.log('[app] Initialising Firebase', { projectId: FIREBASE_CONFIG.projectId });
+
+const firebaseApp = initializeApp(FIREBASE_CONFIG);
+const db          = getFirestore(firebaseApp);
+const auth        = getAuth(firebaseApp);
+
+DB.init(db);
+Auth.init(auth);
+Auth.initDb(db); // gives auth.js access to Firestore for collection group queries
+
+console.log('[app] Module singletons initialised');
+
+
+// ════════════════════════════════════════════════════════════════════════
+// §7 APP BOOTSTRAP
+// ════════════════════════════════════════════════════════════════════════
+
+// ── DOM refs ──────────────────────────────────────────────────────────
+const screenLoading = document.getElementById('screen-loading');
+const screenAuth    = document.getElementById('screen-auth');
+const app           = document.getElementById('app');
+const btnSignIn     = document.getElementById('btn-signin');
+const authError     = document.getElementById('auth-error');
+const topbarBrand   = document.getElementById('topbar-brand');
+const topbarRole    = document.getElementById('topbar-role');
+const userAvatar    = document.getElementById('user-avatar');
+const userName      = document.getElementById('user-name');
+const offlineBanner = document.getElementById('offline-banner');
+const pendingBadge  = document.getElementById('pending-badge');
+const bottomNav     = document.getElementById('bottom-nav');
+const modalOverlay  = document.getElementById('modal-overlay');
+const loadingMsg    = document.getElementById('loading-msg');
+
+// ── Current screen ────────────────────────────────────────────────────
+let _currentScreen = null;
+
+// ── Screen registry ───────────────────────────────────────────────────
+// Each entry maps a screen ID to its render function and minimum role.
+// render fn receives full session object — always has businessId.
+const SCREEN_REGISTRY = {
+  orders:    { minRole: 'staff',   render: renderOrders    },
+  inventory: { minRole: 'staff',   render: renderInventory },
+  scan:      { minRole: 'staff',   render: renderScan      },
+  customers: { minRole: 'staff',   render: renderCustomers },
+  more:      { minRole: 'staff',   render: renderMore      },
+};
+
+// ── switchScreen(screenId) ────────────────────────────────────────────
+// Validates role, updates nav, calls screen render function.
+// Exposed on window so screen modules can trigger navigation.
+async function switchScreen(screenId) {
+  console.log('[app.switchScreen] called', { screenId, prev: _currentScreen });
+
+  const screen  = SCREEN_REGISTRY[screenId];
+  const session = Auth.getSession();
+
+  if (!screen) { console.error('[app.switchScreen] unknown screen', { screenId }); return; }
+  if (!session) { console.warn('[app.switchScreen] no session'); return; }
+
+  // Role guard
+  if (!Auth.hasRole(screen.minRole)) {
+    UI.toast('Access denied.', 'err');
+    console.warn('[app.switchScreen] access denied', { screenId, role: session.role });
+    return;
+  }
+
+  // Update nav
+  bottomNav.querySelectorAll('.nav-item').forEach(btn =>
+    btn.classList.toggle('active', btn.dataset.screen === screenId)
+  );
+
+  _currentScreen = screenId;
+
+  // Call screen render — passes full session including businessId
+  try {
+    await screen.render(session);
+  } catch(e) {
+    console.error('[app.switchScreen] screen render failed', { screenId, error: e });
+    UI.renderError('Failed to load screen: ' + (e.message || 'unknown error'));
+  }
+}
+
+window.switchScreen = switchScreen;
+
+// ── showApp(session) ──────────────────────────────────────────────────
+async function showApp(session) {
+  console.log('[app.showApp]', { uid: session.uid, role: session.role, businessId: session.businessId });
+
+  // Load business name for topbar
+  let businessName = session.businessName || 'Plantness';
+  try {
+    const bizResult = await DB.dbGet(DB.COL_BUSINESSES, session.businessId);
+    if (bizResult.ok && bizResult.data.business_name) {
+      businessName = bizResult.data.business_name;
+    }
+  } catch(e) {
+    console.warn('[app.showApp] could not load business name', e?.message);
+  }
+
+  // Populate topbar
+  topbarBrand.textContent = businessName;
+  topbarRole.textContent  = session.role;
+  topbarRole.className    = `role-badge role-${session.role}`;
+  userName.textContent    = session.displayName.split(' ')[0];
+
+  if (session.photoURL) {
+    userAvatar.innerHTML = `<img src="${_esc(session.photoURL)}" alt=""/>`;
+  } else {
+    userAvatar.textContent = _initials(session.displayName);
+  }
+
+  // Show pending badge for managers/owners
+  if (Auth.isManager()) pendingBadge.classList.remove('hide');
+
+  // Show app shell
+  screenLoading.style.display = 'none';
+  screenAuth.style.display    = 'none';
+  app.style.display           = 'flex';
+
+  // Fetch pending count for badge (non-blocking)
+  refreshPendingBadge();
+
+  // Default screen
+  await switchScreen('orders');
+}
+
+// ── refreshPendingBadge() ─────────────────────────────────────────────
+// Fetches current pending count and updates the nav badge.
+// Called on login and exposed on window so pending.js can call it after
+// approving/rejecting items.
+async function refreshPendingBadge() {
+  if (!Auth.isManager()) return;
+  try {
+    const session  = Auth.getSession();
+    if (!session) return;
+    const items    = await listPending(session.businessId);
+    const count    = items.length;
+    pendingBadge.textContent = count > 9 ? '9+' : String(count);
+    if (count > 0) pendingBadge.classList.remove('hide');
+    else           pendingBadge.classList.add('hide');
+  } catch(e) {
+    console.warn('[app.refreshPendingBadge] failed', e?.message);
+  }
+}
+window.refreshPendingBadge = refreshPendingBadge;
+
+// ── showAuthScreen() ──────────────────────────────────────────────────
+function showAuthScreen() {
+  screenLoading.style.display = 'none';
+  screenAuth.style.display    = 'flex';
+  app.style.display           = 'none';
+  authError.style.display     = 'none';
+  btnSignIn.disabled          = false;
+  btnSignIn.innerHTML         = SIGNIN_BTN_HTML;
+}
+
+// ── Auth state listener ───────────────────────────────────────────────
+Auth.onSessionChange(session => {
+  console.log('[app] session changed', session
+    ? { uid: session?.uid, role: session?.role, businessId: session?.businessId }
+    : null
+  );
+  if (!session) {
+    showAuthScreen();
+  } else if (session.blocked) {
+    // Whitelist blocked — show error on auth screen
+    screenLoading.style.display = 'none';
+    screenAuth.style.display    = 'flex';
+    app.style.display           = 'none';
+    authError.textContent       = session.message;
+    authError.style.display     = 'block';
+    btnSignIn.disabled          = false;
+    btnSignIn.innerHTML         = SIGNIN_BTN_HTML;
+  } else {
+    showApp(session);
+  }
+});
+
+// ── Sign In button ────────────────────────────────────────────────────
+const SIGNIN_BTN_HTML = `
+  <svg width="16" height="16" viewBox="0 0 24 24">
+    <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+    <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+    <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/>
+    <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+  </svg>
+  Continue with Google`;
+
+btnSignIn.addEventListener('click', async () => {
+  btnSignIn.disabled  = true;
+  btnSignIn.innerHTML = '<span style="opacity:.6">Opening Google…</span>';
+  authError.style.display = 'none';
+  const result = await Auth.signIn();
+  if (result.error) {
+    if (result.code !== 'POPUP_CLOSED') {
+      authError.textContent   = 'Sign-in failed: ' + result.message;
+      authError.style.display = 'block';
+    }
+    btnSignIn.disabled  = false;
+    btnSignIn.innerHTML = SIGNIN_BTN_HTML;
+  }
+});
+
+// ── Nav wiring ────────────────────────────────────────────────────────
+bottomNav.querySelectorAll('.nav-item').forEach(btn =>
+  btn.addEventListener('click', () => switchScreen(btn.dataset.screen))
+);
+
+// ── Modal backdrop close ──────────────────────────────────────────────
+modalOverlay.addEventListener('click', e => {
+  if (e.target === modalOverlay) {
+    const { closeModal } = UI;
+    if (closeModal) UI.closeModal();
+  }
+});
+
+// ── Offline detection ─────────────────────────────────────────────────
+function updateOnlineStatus() {
+  offlineBanner.style.display = navigator.onLine ? 'none' : 'block';
+  console.log('[app] online status', { isOnline: navigator.onLine });
+}
+window.addEventListener('online',  updateOnlineStatus);
+window.addEventListener('offline', updateOnlineStatus);
+updateOnlineStatus();
+
+// ── Local utility functions ───────────────────────────────────────────
+function _esc(str) {
+  return String(str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function _initials(name) {
+  const p = (name||'?').trim().split(' ');
+  return (p.length>1 ? p[0][0]+p[p.length-1][0] : p[0][0]).toUpperCase();
+}
+
+console.log('[app] Bootstrap complete — waiting for auth state');
+
+</script>
+</body>
+</html>
